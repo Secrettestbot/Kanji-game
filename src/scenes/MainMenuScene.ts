@@ -64,6 +64,9 @@ export class MainMenuScene extends Phaser.Scene {
 
     buttons.push({ label: '新規 New Game (Sandbox)', action: () => this.startSandbox() });
     buttons.push({ label: '巻物 Campaign Scrolls', action: () => this.showScrollSelect() });
+    buttons.push({ label: '自由 Custom Mode (Paste Text)', action: () => this.scene.start('CustomModeScene') });
+
+    buttons.push({ label: '設定 Settings', action: () => this.scene.start('SettingsScene') });
 
     if (dueCount > 0) {
       buttons.push({

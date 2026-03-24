@@ -73,11 +73,16 @@ export class BootScene extends Phaser.Scene {
     this.createMachineTexture('machine_loom', COLORS.LOOM, '織');
     this.createMachineTexture('machine_dispatch', COLORS.DISPATCH, '送');
 
-    // Conveyor belt texture
+    // Conveyor belt texture — bamboo channel look
     const beltGfx = this.make.graphics({ x: 0, y: 0 });
     beltGfx.fillStyle(COLORS.BELT_COLOR);
     beltGfx.fillRect(4, 4, TILE_SIZE - 8, TILE_SIZE - 8);
-    beltGfx.fillStyle(COLORS.SUMI_LIGHT, 0.5);
+    // Grooves
+    beltGfx.fillStyle(COLORS.SUMI_DARK, 0.3);
+    beltGfx.fillRect(6, 8, TILE_SIZE - 12, 1);
+    beltGfx.fillRect(6, 15, TILE_SIZE - 12, 1);
+    beltGfx.fillRect(6, 22, TILE_SIZE - 12, 1);
+    beltGfx.fillStyle(COLORS.SUMI_LIGHT, 0.4);
     beltGfx.fillRect(6, TILE_SIZE / 2 - 1, TILE_SIZE - 12, 2);
     beltGfx.lineStyle(1, COLORS.GRID_LINE, 0.3);
     beltGfx.strokeRect(0, 0, TILE_SIZE, TILE_SIZE);
@@ -86,7 +91,7 @@ export class BootScene extends Phaser.Scene {
 
     // Belt direction arrow
     const arrowGfx = this.make.graphics({ x: 0, y: 0 });
-    arrowGfx.fillStyle(COLORS.WASHI_CREAM);
+    arrowGfx.fillStyle(COLORS.WASHI_CREAM, 0.8);
     arrowGfx.fillTriangle(
       TILE_SIZE / 2, 6,
       TILE_SIZE - 8, TILE_SIZE - 8,
@@ -94,6 +99,24 @@ export class BootScene extends Phaser.Scene {
     );
     arrowGfx.generateTexture('belt_arrow', TILE_SIZE, TILE_SIZE);
     arrowGfx.destroy();
+
+    // Radical item circle texture (green)
+    const radItemGfx = this.make.graphics({ x: 0, y: 0 });
+    radItemGfx.fillStyle(COLORS.JADE, 0.9);
+    radItemGfx.fillCircle(10, 10, 10);
+    radItemGfx.lineStyle(1, COLORS.SUMI_BLACK, 0.5);
+    radItemGfx.strokeCircle(10, 10, 10);
+    radItemGfx.generateTexture('item_radical', 20, 20);
+    radItemGfx.destroy();
+
+    // Kanji item circle texture (red)
+    const kanjiItemGfx = this.make.graphics({ x: 0, y: 0 });
+    kanjiItemGfx.fillStyle(COLORS.VERMILLION, 0.9);
+    kanjiItemGfx.fillCircle(10, 10, 10);
+    kanjiItemGfx.lineStyle(1, COLORS.SUMI_BLACK, 0.5);
+    kanjiItemGfx.strokeCircle(10, 10, 10);
+    kanjiItemGfx.generateTexture('item_kanji', 20, 20);
+    kanjiItemGfx.destroy();
   }
 
   private createMachineTexture(key: string, color: number, kanji: string): void {

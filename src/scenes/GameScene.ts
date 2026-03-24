@@ -79,6 +79,10 @@ export class GameScene extends Phaser.Scene {
   // Campaign scroll (if playing a scroll)
   private activeScroll?: ScrollData;
 
+  // Scroll completion tracking
+  private scrollKanjiProduced = new Set<string>();
+  private playTimer = 0;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -186,6 +190,9 @@ export class GameScene extends Phaser.Scene {
     // Tick dispatch quota timers
     this.tickQuotas(dt);
 
+    // Track play time
+    this.playTimer += dt;
+
     // Auto-save every 30 seconds
     this.autoSaveTimer += dt;
     if (this.autoSaveTimer >= 30) {
@@ -194,11 +201,44 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  private checkScrollCompletion(): void {
+    if (!this.activeScroll) return;
+
+    // Check if all new kanji for this scroll have been produced
+    const allProduced = this.activeScroll.newKanji.every(k => this.scrollKanjiProduced.has(k));
+    if (!allProduced) return;
+
+    // Scroll complete!
+    this.time.delayedCall(1500, () => {
+      SaveManager.save();
+      this.scene.start('RevealScene', {
+        scroll: this.activeScroll,
+        stats: {
+          kanjiUnlocked: this.scrollKanjiProduced.size,
+          totalShipped: this.totalShippedCount,
+          timePlayed: Math.floor(this.playTimer),
+        },
+      });
+    });
+  }
+
   // ─── Production Event Handlers ───
 
   private onRadicalExtracted(machineId: string, radical: string, _mx: number, _my: number): void {
     const machine = this.machines.find(m => m.id === machineId);
     if (!machine) return;
+
+    // Subtle pulse on extractor
+    const sprite = this.machineSprites.get(machineId);
+    if (sprite) {
+      this.tweens.add({
+        targets: sprite,
+        scaleX: 1.05,
+        scaleY: 1.05,
+        duration: 100,
+        yoyo: true,
+      });
+    }
 
     // Find output position (right side of 2x2 machine)
     const outX = machine.x + machine.width;
@@ -249,6 +289,27 @@ export class GameScene extends Phaser.Scene {
     const machine = this.machines.find(m => m.id === machineId);
     if (!machine) return;
 
+    // Track for scroll completion
+    this.scrollKanjiProduced.add(character);
+
+    // Machine activation flash effect
+    const sprite = this.machineSprites.get(machineId);
+    if (sprite) {
+      const flash = this.add.circle(
+        machine.x * TILE_SIZE + (machine.width * TILE_SIZE) / 2,
+        machine.y * TILE_SIZE + (machine.height * TILE_SIZE) / 2,
+        machine.width * TILE_SIZE * 0.6,
+        COLORS.VERMILLION, 0.4
+      ).setDepth(15);
+      this.tweens.add({
+        targets: flash,
+        alpha: 0,
+        scale: 1.5,
+        duration: 400,
+        onComplete: () => flash.destroy(),
+      });
+    }
+
     // Output kanji to belt
     const outX = machine.x + machine.width;
     const outY = machine.y + Math.floor(machine.height / 2);
@@ -258,6 +319,9 @@ export class GameScene extends Phaser.Scene {
       const item = this.conveyorSystem.addItem(character, 'kanji', outX, outY);
       this.createItemSprite(item);
     }
+
+    // Check scroll completion
+    this.checkScrollCompletion();
   }
 
   private onItemReachMachine(item: BeltItem, machine: MachineInstance): void {
