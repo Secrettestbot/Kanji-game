@@ -1,6 +1,10 @@
 import Phaser from 'phaser';
 import { TILE_SIZE, MAP_DEFAULT_WIDTH, MAP_DEFAULT_HEIGHT, COLORS, STARTING_INK_POINTS } from '../config';
-import { TileType, MachineType, Direction, MachineTier, Position, BeltSegment, MachineInstance, OreNodeData } from '../types';
+import { TileType, MachineType, Direction, MachineTier, BeltSegment, MachineInstance, OreNodeData } from '../types';
+import { ProductionSystem } from '../systems/ProductionSystem';
+import { ConveyorSystem, BeltItem } from '../systems/ConveyorSystem';
+import { GameState } from '../state/GameState';
+import { DataManager } from '../data/DataManager';
 
 // Build mode selection
 type BuildSelection =
@@ -35,7 +39,7 @@ export class GameScene extends Phaser.Scene {
   private isDraggingCamera = false;
   private lastPointer = { x: 0, y: 0 };
 
-  // Economy
+  // Economy (synced with GameState)
   private inkPoints = STARTING_INK_POINTS;
 
   // UI layer
@@ -44,20 +48,287 @@ export class GameScene extends Phaser.Scene {
   // Counters
   private machineIdCounter = 0;
 
+  // Systems
+  private productionSystem!: ProductionSystem;
+  private conveyorSystem!: ConveyorSystem;
+
+  // Item sprites on belts
+  private itemSprites: Map<string, Phaser.GameObjects.Container> = new Map();
+
+  // Dispatch tracking
+  private shippedKanjiCount = 0;
+  private totalShippedCount = 0;
+
+  // Gate state
+  private gateActive = false;
+  private gateMachineId: string | null = null;
+
+  // Notification queue
+  private notifications: Phaser.GameObjects.Container[] = [];
+
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create(): void {
+    this.productionSystem = new ProductionSystem();
+    this.conveyorSystem = new ConveyorSystem();
+
     this.initMap();
     this.renderMap();
     this.setupCamera();
     this.setupInput();
     this.createBuildPanel();
     this.createHUD();
-
-    // Place some demo ore nodes
     this.placeOreNodes();
+
+    // Listen for gate scene results
+    this.scene.get('PronunciationGateScene')?.events?.on('gate-result', this.handleGateResult, this);
+  }
+
+  update(_time: number, delta: number): void {
+    const dt = delta / 1000; // ms to seconds
+
+    if (this.gateActive) return; // Pause production during gate
+
+    // Run production system tick
+    this.productionSystem.update(
+      dt,
+      this.machines,
+      (machine) => this.getAdjacentOreNode(machine),
+      (machine) => this.getOutputBeltDirection(machine),
+    );
+
+    // Process production events
+    const events = this.productionSystem.getEvents();
+    for (const evt of events) {
+      switch (evt.type) {
+        case 'radical_extracted':
+          this.onRadicalExtracted(evt.machineId!, evt.character!, evt.x, evt.y);
+          break;
+        case 'gate_triggered':
+          this.onGateTriggered(evt.machineId!, evt.character!);
+          break;
+        case 'kanji_produced':
+          this.onKanjiProduced(evt.machineId!, evt.character!);
+          break;
+      }
+    }
+
+    // Run conveyor system tick
+    this.conveyorSystem.update(
+      dt,
+      (x, y) => this.getBeltAt(x, y),
+      (x, y) => this.getMachineAtTile(x, y),
+      (item, machine) => this.onItemReachMachine(item, machine),
+      (item) => this.onItemFallOff(item),
+    );
+
+    // Update item sprite positions
+    this.updateItemSprites();
+  }
+
+  // ─── Production Event Handlers ───
+
+  private onRadicalExtracted(machineId: string, radical: string, _mx: number, _my: number): void {
+    const machine = this.machines.find(m => m.id === machineId);
+    if (!machine) return;
+
+    // Find output position (right side of 2x2 machine)
+    const outX = machine.x + machine.width;
+    const outY = machine.y + Math.floor(machine.height / 2);
+
+    // Check if there's a belt at the output position
+    const belt = this.getBeltAt(outX, outY);
+    if (belt) {
+      const item = this.conveyorSystem.addItem(radical, 'radical', outX, outY);
+      this.createItemSprite(item);
+    }
+  }
+
+  private onGateTriggered(machineId: string, character: string): void {
+    // Check if kanji is already unlocked - if so, skip gate
+    if (GameState.isKanjiUnlocked(character)) {
+      this.productionSystem.gateCleared(machineId);
+      return;
+    }
+
+    this.gateActive = true;
+    this.gateMachineId = machineId;
+
+    // Launch pronunciation gate overlay
+    this.scene.launch('PronunciationGateScene', {
+      kanji: character,
+      kanjiData: DataManager.getKanji(character),
+    });
+    this.scene.pause();
+  }
+
+  private handleGateResult = (result: { passed: boolean; kanji: string }): void => {
+    this.scene.resume();
+    this.gateActive = false;
+
+    if (result.passed && this.gateMachineId) {
+      GameState.unlockKanji(result.kanji);
+      this.productionSystem.gateCleared(this.gateMachineId);
+      this.showNotification(`✓ ${result.kanji} unlocked!`, COLORS.JADE);
+    } else if (this.gateMachineId) {
+      this.productionSystem.gateFailed(this.gateMachineId);
+      this.showNotification(`${result.kanji} — try again next time`, COLORS.VERMILLION);
+    }
+    this.gateMachineId = null;
+  };
+
+  private onKanjiProduced(machineId: string, character: string): void {
+    const machine = this.machines.find(m => m.id === machineId);
+    if (!machine) return;
+
+    // Output kanji to belt
+    const outX = machine.x + machine.width;
+    const outY = machine.y + Math.floor(machine.height / 2);
+
+    const belt = this.getBeltAt(outX, outY);
+    if (belt) {
+      const item = this.conveyorSystem.addItem(character, 'kanji', outX, outY);
+      this.createItemSprite(item);
+    }
+  }
+
+  private onItemReachMachine(item: BeltItem, machine: MachineInstance): void {
+    if (machine.type === MachineType.COMPOSITION_FURNACE && item.type === 'radical') {
+      // Feed radical into furnace
+      this.productionSystem.feedRadical(machine.id, item.character);
+      this.removeItemSprite(item.id);
+    } else if (machine.type === MachineType.DISPATCH_BOARD && item.type === 'kanji') {
+      // Ship kanji
+      const points = GameState.shipKanji(item.character);
+      this.inkPoints = GameState.getInkPoints();
+      this.totalShippedCount++;
+      this.removeItemSprite(item.id);
+      this.showNotification(`📦 ${item.character} shipped! +${points} ink`, COLORS.GOLD);
+      this.updateHUD();
+    } else {
+      // Item can't be consumed, fall off
+      this.removeItemSprite(item.id);
+    }
+  }
+
+  private onItemFallOff(item: BeltItem): void {
+    this.removeItemSprite(item.id);
+  }
+
+  // ─── Item Sprite Management ───
+
+  private createItemSprite(item: BeltItem): void {
+    const container = this.add.container(item.pixelX, item.pixelY);
+
+    // Background circle
+    const bg = this.add.circle(0, 0, 10, item.type === 'radical' ? COLORS.JADE : COLORS.VERMILLION, 0.9);
+    container.add(bg);
+
+    // Character text
+    const text = this.add.text(0, 0, item.character, {
+      fontSize: '12px',
+      color: '#f5f0e1',
+      fontFamily: '"Noto Sans JP", sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+    container.add(text);
+
+    container.setDepth(50);
+    this.itemSprites.set(item.id, container);
+  }
+
+  private removeItemSprite(id: string): void {
+    const sprite = this.itemSprites.get(id);
+    if (sprite) {
+      // Fade out and destroy
+      this.tweens.add({
+        targets: sprite,
+        alpha: 0,
+        scale: 0.3,
+        duration: 200,
+        onComplete: () => sprite.destroy(),
+      });
+      this.itemSprites.delete(id);
+    }
+  }
+
+  private updateItemSprites(): void {
+    for (const item of this.conveyorSystem.getItems()) {
+      const sprite = this.itemSprites.get(item.id);
+      if (sprite) {
+        sprite.setPosition(item.pixelX, item.pixelY);
+      }
+    }
+  }
+
+  // ─── Helper Queries ───
+
+  private getAdjacentOreNode(machine: MachineInstance): OreNodeData | undefined {
+    // Check all tiles adjacent to the machine footprint
+    for (let dy = -1; dy <= machine.height; dy++) {
+      for (let dx = -1; dx <= machine.width; dx++) {
+        // Only check border tiles
+        if (dy >= 0 && dy < machine.height && dx >= 0 && dx < machine.width) continue;
+
+        const tx = machine.x + dx;
+        const ty = machine.y + dy;
+        if (tx < 0 || tx >= this.mapWidth || ty < 0 || ty >= this.mapHeight) continue;
+
+        const node = this.oreNodes.find(n => n.x === tx && n.y === ty && n.richness > 0);
+        if (node) return node;
+      }
+    }
+    return undefined;
+  }
+
+  private getOutputBeltDirection(machine: MachineInstance): Direction | null {
+    const outX = machine.x + machine.width;
+    const outY = machine.y + Math.floor(machine.height / 2);
+    const belt = this.getBeltAt(outX, outY);
+    return belt?.direction ?? null;
+  }
+
+  private getBeltAt(x: number, y: number): BeltSegment | undefined {
+    return this.belts.find(b => b.x === x && b.y === y);
+  }
+
+  private getMachineAtTile(x: number, y: number): MachineInstance | undefined {
+    const occupant = this.occupationGrid[y]?.[x];
+    if (!occupant || occupant === 'belt' || occupant === 'obstacle') return undefined;
+    return this.machines.find(m => m.id === occupant);
+  }
+
+  // ─── Notifications ───
+
+  private showNotification(text: string, color: number): void {
+    const cam = this.cameras.main;
+    const container = this.add.container(cam.width / 2, 60 + this.notifications.length * 40)
+      .setScrollFactor(0).setDepth(2000);
+
+    const bg = this.add.rectangle(0, 0, 300, 30, color, 0.85).setStrokeStyle(1, 0x000000, 0.3);
+    const label = this.add.text(0, 0, text, {
+      fontSize: '14px',
+      color: '#f5f0e1',
+      fontFamily: '"Noto Sans JP", sans-serif',
+      fontStyle: 'bold',
+    }).setOrigin(0.5);
+
+    container.add([bg, label]);
+    this.notifications.push(container);
+
+    this.tweens.add({
+      targets: container,
+      alpha: 0,
+      y: container.y - 20,
+      delay: 1500,
+      duration: 500,
+      onComplete: () => {
+        container.destroy();
+        this.notifications = this.notifications.filter(n => n !== container);
+      },
+    });
   }
 
   // ─── Map Initialization ───
@@ -82,7 +353,6 @@ export class GameScene extends Phaser.Scene {
     for (let i = 0; i < Math.floor(this.mapWidth * this.mapHeight * 0.05); i++) {
       const ox = Math.floor(Math.random() * this.mapWidth);
       const oy = Math.floor(Math.random() * this.mapHeight);
-      // Keep edges clear
       if (ox > 2 && ox < this.mapWidth - 3 && oy > 2 && oy < this.mapHeight - 3) {
         this.tiles[oy][ox] = TileType.OBSTACLE;
         this.occupationGrid[oy][ox] = 'obstacle';
@@ -91,9 +361,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private placeOreNodes(): void {
-    // Demo ore nodes with radicals for testing
     const demoRadicals = ['人', '大', '山', '川', '日', '月', '木', '火', '水', '金', '土', '口'];
-    let placed = 0;
     for (const radical of demoRadicals) {
       let attempts = 0;
       while (attempts < 50) {
@@ -103,14 +371,12 @@ export class GameScene extends Phaser.Scene {
           this.tiles[y][x] = TileType.ORE_NODE;
           this.oreNodes.push({ radical, x, y, richness: 3 });
 
-          // Update sprite
           if (this.tileSprites[y][x]) {
             this.tileSprites[y][x]!.destroy();
           }
           const sprite = this.add.image(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 'tile_ore');
           this.tileSprites[y][x] = sprite;
 
-          // Radical label on ore node
           this.add.text(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, radical, {
             fontSize: '16px',
             color: '#1a1410',
@@ -118,7 +384,6 @@ export class GameScene extends Phaser.Scene {
             fontStyle: 'bold',
           }).setOrigin(0.5).setDepth(1);
 
-          placed++;
           break;
         }
         attempts++;
@@ -142,7 +407,6 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Hover highlight
     this.hoverHighlight = this.add.rectangle(0, 0, TILE_SIZE, TILE_SIZE)
       .setStrokeStyle(2, COLORS.HIGHLIGHT)
       .setFillStyle(COLORS.HIGHLIGHT, 0.15)
@@ -162,24 +426,19 @@ export class GameScene extends Phaser.Scene {
       worldHeight + TILE_SIZE * 4
     );
 
-    // Center camera
     this.cameras.main.centerOn(worldWidth / 2, worldHeight / 2);
-
-    // Zoom bounds
     this.cameras.main.setZoom(1);
   }
 
   // ─── Input ───
 
   private setupInput(): void {
-    // Mouse wheel zoom
     this.input.on('wheel', (_pointer: Phaser.Input.Pointer, _gx: number[], _gy: number[], _gz: number[], deltaY: number) => {
       const cam = this.cameras.main;
       const newZoom = Phaser.Math.Clamp(cam.zoom - deltaY * 0.001, 0.5, 3);
       cam.setZoom(newZoom);
     });
 
-    // Pointer down
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (pointer.rightButtonDown() || pointer.middleButtonDown()) {
         this.isDraggingCamera = true;
@@ -187,7 +446,6 @@ export class GameScene extends Phaser.Scene {
         return;
       }
 
-      // Check if clicking on UI (above game world)
       if (pointer.x > this.cameras.main.width - 200) return;
 
       const worldPos = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
@@ -206,7 +464,6 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    // Pointer move
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
       if (this.isDraggingCamera) {
         const dx = pointer.x - this.lastPointer.x;
@@ -217,7 +474,6 @@ export class GameScene extends Phaser.Scene {
         return;
       }
 
-      // Update hover highlight
       const worldPos = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       const tileX = Math.floor(worldPos.x / TILE_SIZE);
       const tileY = Math.floor(worldPos.y / TILE_SIZE);
@@ -232,7 +488,6 @@ export class GameScene extends Phaser.Scene {
         this.hoverHighlight.setVisible(false);
       }
 
-      // Belt dragging
       if (this.isDraggingBelt && pointer.leftButtonDown()) {
         if (tileX >= 0 && tileX < this.mapWidth && tileY >= 0 && tileY < this.mapHeight) {
           this.placeBelt(tileX, tileY);
@@ -240,7 +495,6 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    // Pointer up
     this.input.on('pointerup', () => {
       this.isDraggingCamera = false;
       this.isDraggingBelt = false;
@@ -273,6 +527,12 @@ export class GameScene extends Phaser.Scene {
       this.buildSelection = { type: 'demolish' };
       this.updateBuildPanelHighlight();
     });
+
+    // Codex shortcut
+    this.input.keyboard?.on('keydown-C', () => {
+      this.scene.launch('CodexScene');
+      this.scene.pause();
+    });
   }
 
   // ─── Machine Placement ───
@@ -280,10 +540,8 @@ export class GameScene extends Phaser.Scene {
   private placeMachine(tileX: number, tileY: number, machineType: MachineType): void {
     const size = this.getMachineSize(machineType);
 
-    // Check bounds
     if (tileX + size.w > this.mapWidth || tileY + size.h > this.mapHeight) return;
 
-    // Check occupation
     for (let dy = 0; dy < size.h; dy++) {
       for (let dx = 0; dx < size.w; dx++) {
         if (this.occupationGrid[tileY + dy][tileX + dx]) return;
@@ -291,11 +549,11 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    // Check cost
     const cost = this.getMachineCost(machineType);
     if (this.inkPoints < cost) return;
 
     this.inkPoints -= cost;
+    GameState.spendInkPoints(cost);
 
     const id = `machine_${this.machineIdCounter++}`;
     const machine: MachineInstance = {
@@ -309,14 +567,15 @@ export class GameScene extends Phaser.Scene {
     };
     this.machines.push(machine);
 
-    // Mark occupation
+    // Init in production system
+    this.productionSystem.initMachine(machine);
+
     for (let dy = 0; dy < size.h; dy++) {
       for (let dx = 0; dx < size.w; dx++) {
         this.occupationGrid[tileY + dy][tileX + dx] = id;
       }
     }
 
-    // Create visual
     this.createMachineSprite(machine);
     this.updateHUD();
   }
@@ -334,14 +593,12 @@ export class GameScene extends Phaser.Scene {
     );
     container.add(bg);
 
-    // Label
     const label = this.add.image(0, 0, textureKey + '_label').setDisplaySize(
       machine.width * TILE_SIZE - 2,
       machine.height * TILE_SIZE - 2
     );
     container.add(label);
 
-    // Machine name below
     const name = this.getMachineName(machine.type);
     const nameText = this.add.text(0, machine.height * TILE_SIZE / 2 + 2, name, {
       fontSize: '9px',
@@ -361,15 +618,12 @@ export class GameScene extends Phaser.Scene {
     if (this.occupationGrid[tileY][tileX]) return;
     if (this.tiles[tileY][tileX] === TileType.OBSTACLE) return;
 
-    // Check if belt already exists at this position
     const key = `${tileX},${tileY}`;
     if (this.beltSprites.has(key)) return;
 
-    // Cost check
     if (this.inkPoints < 1) return;
     this.inkPoints -= 1;
 
-    // Determine direction based on last belt
     let dir = Direction.RIGHT;
     if (this.belts.length > 0) {
       const lastBelt = this.belts[this.belts.length - 1];
@@ -386,13 +640,12 @@ export class GameScene extends Phaser.Scene {
     this.belts.push(belt);
     this.occupationGrid[tileY][tileX] = 'belt';
 
-    // Create visual
     const px = tileX * TILE_SIZE + TILE_SIZE / 2;
     const py = tileY * TILE_SIZE + TILE_SIZE / 2;
 
     const container = this.add.container(px, py);
-    const bg = this.add.image(0, 0, 'belt');
-    container.add(bg);
+    const bgSprite = this.add.image(0, 0, 'belt');
+    container.add(bgSprite);
 
     const arrow = this.add.image(0, 0, 'belt_arrow').setScale(0.6).setAlpha(0.7);
     const rotation = { up: 0, right: Math.PI / 2, down: Math.PI, left: -Math.PI / 2 };
@@ -409,7 +662,6 @@ export class GameScene extends Phaser.Scene {
   private demolishAt(tileX: number, tileY: number): void {
     const occupant = this.occupationGrid[tileY]?.[tileX];
     if (!occupant) return;
-
     if (occupant === 'obstacle') return;
 
     if (occupant === 'belt') {
@@ -421,30 +673,27 @@ export class GameScene extends Phaser.Scene {
       }
       this.belts = this.belts.filter(b => !(b.x === tileX && b.y === tileY));
       this.occupationGrid[tileY][tileX] = null;
-      this.inkPoints += 1; // refund
+      this.inkPoints += 1;
     } else {
-      // Machine
       const machine = this.machines.find(m => m.id === occupant);
       if (!machine) return;
 
-      // Clear occupation
       for (let dy = 0; dy < machine.height; dy++) {
         for (let dx = 0; dx < machine.width; dx++) {
           this.occupationGrid[machine.y + dy][machine.x + dx] = null;
         }
       }
 
-      // Remove sprite
       const sprite = this.machineSprites.get(machine.id);
       if (sprite) {
         sprite.destroy();
         this.machineSprites.delete(machine.id);
       }
 
-      // Refund half cost
       const cost = this.getMachineCost(machine.type);
       this.inkPoints += Math.floor(cost / 2);
 
+      this.productionSystem.removeMachine(machine.id);
       this.machines = this.machines.filter(m => m.id !== machine.id);
     }
 
@@ -461,14 +710,12 @@ export class GameScene extends Phaser.Scene {
     const panelWidth = 180;
     const panelX = this.cameras.main.width - panelWidth;
 
-    // Panel background
     const panelBg = this.add.rectangle(
       panelX + panelWidth / 2, this.cameras.main.height / 2,
       panelWidth, this.cameras.main.height
     ).setFillStyle(COLORS.SUMI_DARK, 0.92).setStrokeStyle(2, COLORS.SUMI_MEDIUM);
     this.uiContainer.add(panelBg);
 
-    // Title
     const title = this.add.text(panelX + panelWidth / 2, 16, '建築 Build', {
       fontSize: '16px',
       color: '#f5f0e1',
@@ -477,7 +724,6 @@ export class GameScene extends Phaser.Scene {
     }).setOrigin(0.5, 0);
     this.uiContainer.add(title);
 
-    // Build buttons
     const buttons = [
       { label: '採 Extractor', key: '1', action: () => { this.buildSelection = { type: 'machine', machineType: MachineType.EXTRACTION_STATION }; } },
       { label: '炉 Furnace', key: '2', action: () => { this.buildSelection = { type: 'machine', machineType: MachineType.COMPOSITION_FURNACE }; } },
@@ -491,7 +737,7 @@ export class GameScene extends Phaser.Scene {
       const y = 50 + i * 44;
       const btnContainer = this.add.container(panelX + panelWidth / 2, y);
 
-      const bg = this.add.rectangle(0, 0, panelWidth - 20, 36)
+      const bgRect = this.add.rectangle(0, 0, panelWidth - 20, 36)
         .setFillStyle(COLORS.SUMI_MEDIUM)
         .setStrokeStyle(1, COLORS.SUMI_LIGHT)
         .setInteractive({ useHandCursor: true })
@@ -499,19 +745,40 @@ export class GameScene extends Phaser.Scene {
           btn.action();
           this.updateBuildPanelHighlight();
         })
-        .on('pointerover', () => bg.setFillStyle(COLORS.SUMI_LIGHT))
-        .on('pointerout', () => this.updateButtonColor(bg, i));
+        .on('pointerover', () => bgRect.setFillStyle(COLORS.SUMI_LIGHT))
+        .on('pointerout', () => this.updateButtonColor(bgRect, i));
 
-      const label = this.add.text(0, 0, `[${btn.key}] ${btn.label}`, {
+      const labelText = this.add.text(0, 0, `[${btn.key}] ${btn.label}`, {
         fontSize: '12px',
         color: '#f5f0e1',
         fontFamily: '"Noto Sans JP", sans-serif',
       }).setOrigin(0.5);
 
-      btnContainer.add([bg, label]);
+      btnContainer.add([bgRect, labelText]);
       this.uiContainer.add(btnContainer);
       this.buildButtons.push(btnContainer);
     });
+
+    // Codex button at bottom
+    const codexY = 50 + buttons.length * 44 + 20;
+    const codexBtn = this.add.container(panelX + panelWidth / 2, codexY);
+    const codexBg = this.add.rectangle(0, 0, panelWidth - 20, 36)
+      .setFillStyle(COLORS.INDIGO)
+      .setStrokeStyle(1, COLORS.SKY)
+      .setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => {
+        this.scene.launch('CodexScene');
+        this.scene.pause();
+      })
+      .on('pointerover', () => codexBg.setFillStyle(COLORS.SKY))
+      .on('pointerout', () => codexBg.setFillStyle(COLORS.INDIGO));
+    const codexLabel = this.add.text(0, 0, '[C] 図鑑 Codex', {
+      fontSize: '12px',
+      color: '#f5f0e1',
+      fontFamily: '"Noto Sans JP", sans-serif',
+    }).setOrigin(0.5);
+    codexBtn.add([codexBg, codexLabel]);
+    this.uiContainer.add(codexBtn);
   }
 
   private updateBuildPanelHighlight(): void {
@@ -549,8 +816,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateHUD(): void {
+    const unlocked = GameState.getAllUnlockedKanji().length;
     this.hudText.setText(
-      `墨 Ink Points: ${this.inkPoints}  |  Machines: ${this.machines.length}  |  Belts: ${this.belts.length}`
+      `墨 Ink: ${this.inkPoints}  |  Machines: ${this.machines.length}  |  Belts: ${this.belts.length}  |  Kanji: ${unlocked}  |  Shipped: ${this.totalShippedCount}`
     );
   }
 
