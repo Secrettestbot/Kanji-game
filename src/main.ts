@@ -4,6 +4,7 @@ import { MainMenuScene } from './scenes/MainMenuScene';
 import { GameScene } from './scenes/GameScene';
 import { PronunciationGateScene } from './scenes/PronunciationGateScene';
 import { CodexScene } from './scenes/CodexScene';
+import { SRSReviewScene } from './scenes/SRSReviewScene';
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -11,7 +12,7 @@ const config: Phaser.Types.Core.GameConfig = {
   width: window.innerWidth,
   height: window.innerHeight,
   backgroundColor: '#1a1410',
-  scene: [BootScene, MainMenuScene, GameScene, PronunciationGateScene, CodexScene],
+  scene: [BootScene, MainMenuScene, GameScene, PronunciationGateScene, CodexScene, SRSReviewScene],
   scale: {
     mode: Phaser.Scale.RESIZE,
     autoCenter: Phaser.Scale.CENTER_BOTH,

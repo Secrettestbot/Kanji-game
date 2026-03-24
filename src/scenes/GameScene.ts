@@ -1,9 +1,10 @@
 import Phaser from 'phaser';
 import { TILE_SIZE, MAP_DEFAULT_WIDTH, MAP_DEFAULT_HEIGHT, COLORS, STARTING_INK_POINTS } from '../config';
-import { TileType, MachineType, Direction, MachineTier, BeltSegment, MachineInstance, OreNodeData } from '../types';
+import { TileType, MachineType, Direction, MachineTier, BeltSegment, MachineInstance, OreNodeData, DispatchQuota, ScrollData } from '../types';
 import { ProductionSystem } from '../systems/ProductionSystem';
 import { ConveyorSystem, BeltItem } from '../systems/ConveyorSystem';
 import { GameState } from '../state/GameState';
+import { SaveManager } from '../state/SaveManager';
 import { DataManager } from '../data/DataManager';
 
 // Build mode selection
@@ -58,6 +59,8 @@ export class GameScene extends Phaser.Scene {
   // Dispatch tracking
   private shippedKanjiCount = 0;
   private totalShippedCount = 0;
+  private dispatchQuotas: DispatchQuota[] = [];
+  private quotaTimers: number[] = [];
 
   // Gate state
   private gateActive = false;
@@ -66,13 +69,51 @@ export class GameScene extends Phaser.Scene {
   // Notification queue
   private notifications: Phaser.GameObjects.Container[] = [];
 
+  // Quota UI
+  private quotaContainer!: Phaser.GameObjects.Container;
+  private quotaTexts: Phaser.GameObjects.Text[] = [];
+
+  // Auto-save timer
+  private autoSaveTimer = 0;
+
+  // Campaign scroll (if playing a scroll)
+  private activeScroll?: ScrollData;
+
   constructor() {
     super({ key: 'GameScene' });
+  }
+
+  init(data?: { scroll?: ScrollData }): void {
+    this.activeScroll = data?.scroll;
   }
 
   create(): void {
     this.productionSystem = new ProductionSystem();
     this.conveyorSystem = new ConveyorSystem();
+
+    // Reset state for new scene
+    this.machines = [];
+    this.machineSprites = new Map();
+    this.belts = [];
+    this.beltSprites = new Map();
+    this.oreNodes = [];
+    this.itemSprites = new Map();
+    this.buildButtons = [];
+    this.notifications = [];
+    this.quotaTexts = [];
+    this.totalShippedCount = 0;
+    this.shippedKanjiCount = 0;
+    this.machineIdCounter = 0;
+    this.inkPoints = GameState.getInkPoints();
+
+    // Use scroll data if available
+    if (this.activeScroll) {
+      this.mapWidth = this.activeScroll.mapData.width;
+      this.mapHeight = this.activeScroll.mapData.height;
+    } else {
+      this.mapWidth = MAP_DEFAULT_WIDTH;
+      this.mapHeight = MAP_DEFAULT_HEIGHT;
+    }
 
     this.initMap();
     this.renderMap();
@@ -80,10 +121,25 @@ export class GameScene extends Phaser.Scene {
     this.setupInput();
     this.createBuildPanel();
     this.createHUD();
-    this.placeOreNodes();
+    this.createQuotaPanel();
+
+    if (this.activeScroll) {
+      this.placeScrollOreNodes();
+      this.dispatchQuotas = this.activeScroll.dispatchQuotas.map(q => ({ ...q, fulfilled: 0 }));
+      this.quotaTimers = this.dispatchQuotas.map(q => q.timeWindowSeconds);
+      this.updateQuotaDisplay();
+    } else {
+      this.placeOreNodes();
+      this.generateDispatchQuotas();
+    }
 
     // Listen for gate scene results
     this.scene.get('PronunciationGateScene')?.events?.on('gate-result', this.handleGateResult, this);
+
+    // Listen for codex close
+    this.events.on('resume', () => {
+      this.gateActive = false;
+    });
   }
 
   update(_time: number, delta: number): void {
@@ -126,6 +182,16 @@ export class GameScene extends Phaser.Scene {
 
     // Update item sprite positions
     this.updateItemSprites();
+
+    // Tick dispatch quota timers
+    this.tickQuotas(dt);
+
+    // Auto-save every 30 seconds
+    this.autoSaveTimer += dt;
+    if (this.autoSaveTimer >= 30) {
+      this.autoSaveTimer = 0;
+      SaveManager.save();
+    }
   }
 
   // ─── Production Event Handlers ───
@@ -205,8 +271,14 @@ export class GameScene extends Phaser.Scene {
       this.inkPoints = GameState.getInkPoints();
       this.totalShippedCount++;
       this.removeItemSprite(item.id);
-      this.showNotification(`📦 ${item.character} shipped! +${points} ink`, COLORS.GOLD);
+
+      // Check quota fulfillment
+      const quotaBonus = this.fulfillQuota(item.character);
+      const totalPoints = points + quotaBonus;
+      const bonusText = quotaBonus > 0 ? ` (+${quotaBonus} bonus!)` : '';
+      this.showNotification(`📦 ${item.character} shipped! +${totalPoints} ink${bonusText}`, COLORS.GOLD);
       this.updateHUD();
+      this.updateQuotaDisplay();
     } else {
       // Item can't be consumed, fall off
       this.removeItemSprite(item.id);
@@ -261,6 +333,140 @@ export class GameScene extends Phaser.Scene {
         sprite.setPosition(item.pixelX, item.pixelY);
       }
     }
+  }
+
+  // ─── Dispatch Quota System ───
+
+  private generateDispatchQuotas(): void {
+    this.dispatchQuotas = [];
+    this.quotaTimers = [];
+
+    // Get kanji that can be produced from available ore nodes
+    const availableRadicals = this.oreNodes.map(n => n.radical);
+    const allKanji = DataManager.getAllKanji();
+    const producible = allKanji.filter(k =>
+      k.radicals.every(r => availableRadicals.includes(r))
+    );
+
+    if (producible.length === 0) return;
+
+    // Generate 3 quotas
+    const shuffled = [...producible].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < Math.min(3, shuffled.length); i++) {
+      const k = shuffled[i];
+      const quota: DispatchQuota = {
+        kanji: k.character,
+        quantity: 1 + Math.floor(Math.random() * 3),
+        fulfilled: 0,
+        timeWindowSeconds: 120 + Math.floor(Math.random() * 180),
+        rewardMultiplier: 1 + Math.random() * 2,
+      };
+      this.dispatchQuotas.push(quota);
+      this.quotaTimers.push(quota.timeWindowSeconds);
+    }
+
+    this.updateQuotaDisplay();
+  }
+
+  private fulfillQuota(kanji: string): number {
+    let bonus = 0;
+    for (let i = 0; i < this.dispatchQuotas.length; i++) {
+      const q = this.dispatchQuotas[i];
+      if (q.kanji === kanji && q.fulfilled < q.quantity) {
+        q.fulfilled++;
+        if (q.fulfilled >= q.quantity) {
+          // Quota complete! Award bonus
+          bonus = Math.floor(q.quantity * q.rewardMultiplier * 2);
+          GameState.addInkPoints(bonus);
+          this.inkPoints = GameState.getInkPoints();
+          this.showNotification(`★ Quota complete! ${q.kanji} ×${q.quantity}`, COLORS.GOLD);
+
+          // Replace with a new quota after a delay
+          this.time.delayedCall(2000, () => this.replaceQuota(i));
+        }
+        break;
+      }
+    }
+    return bonus;
+  }
+
+  private replaceQuota(index: number): void {
+    const availableRadicals = this.oreNodes.map(n => n.radical);
+    const allKanji = DataManager.getAllKanji();
+    const producible = allKanji.filter(k =>
+      k.radicals.every(r => availableRadicals.includes(r))
+    );
+
+    if (producible.length === 0) return;
+
+    const k = producible[Math.floor(Math.random() * producible.length)];
+    this.dispatchQuotas[index] = {
+      kanji: k.character,
+      quantity: 1 + Math.floor(Math.random() * 3),
+      fulfilled: 0,
+      timeWindowSeconds: 120 + Math.floor(Math.random() * 180),
+      rewardMultiplier: 1 + Math.random() * 2,
+    };
+    this.quotaTimers[index] = this.dispatchQuotas[index].timeWindowSeconds;
+    this.updateQuotaDisplay();
+  }
+
+  private tickQuotas(dt: number): void {
+    let needsUpdate = false;
+    for (let i = 0; i < this.quotaTimers.length; i++) {
+      if (this.dispatchQuotas[i].fulfilled >= this.dispatchQuotas[i].quantity) continue;
+      this.quotaTimers[i] -= dt;
+      if (this.quotaTimers[i] <= 0) {
+        // Quota expired, replace it
+        this.showNotification(`✕ Quota expired: ${this.dispatchQuotas[i].kanji}`, COLORS.SUMI_LIGHT);
+        this.replaceQuota(i);
+      }
+      needsUpdate = true;
+    }
+    if (needsUpdate) this.updateQuotaDisplay();
+  }
+
+  private createQuotaPanel(): void {
+    const cam = this.cameras.main;
+    this.quotaContainer = this.add.container(12, 50).setScrollFactor(0).setDepth(1000);
+
+    const title = this.add.text(0, 0, '📋 Dispatch Orders', {
+      fontSize: '13px',
+      color: '#c4a747',
+      fontFamily: '"Noto Sans JP", sans-serif',
+      fontStyle: 'bold',
+    });
+    this.quotaContainer.add(title);
+  }
+
+  private updateQuotaDisplay(): void {
+    // Remove old texts
+    for (const t of this.quotaTexts) t.destroy();
+    this.quotaTexts = [];
+
+    this.dispatchQuotas.forEach((q, i) => {
+      const timer = Math.max(0, Math.floor(this.quotaTimers[i] || 0));
+      const min = Math.floor(timer / 60);
+      const sec = timer % 60;
+      const timeStr = `${min}:${sec.toString().padStart(2, '0')}`;
+      const done = q.fulfilled >= q.quantity;
+      const mult = q.rewardMultiplier.toFixed(1);
+
+      const text = this.add.text(0, 22 + i * 22,
+        done
+          ? `  ✓ ${q.kanji} ×${q.quantity} — Complete!`
+          : `  ${q.kanji} ${q.fulfilled}/${q.quantity}  ${timeStr}  ×${mult}`,
+        {
+          fontSize: '12px',
+          color: done ? '#68be8d' : '#f5f0e1',
+          fontFamily: '"Noto Sans JP", sans-serif',
+          backgroundColor: '#2d2520aa',
+          padding: { x: 4, y: 2 },
+        }
+      );
+      this.quotaContainer.add(text);
+      this.quotaTexts.push(text);
+    });
   }
 
   // ─── Helper Queries ───
@@ -388,6 +594,31 @@ export class GameScene extends Phaser.Scene {
         }
         attempts++;
       }
+    }
+  }
+
+  private placeScrollOreNodes(): void {
+    if (!this.activeScroll) return;
+    for (const node of this.activeScroll.mapData.oreNodes) {
+      const { x, y, radical, richness } = node;
+      if (x >= this.mapWidth || y >= this.mapHeight) continue;
+      if (this.tiles[y][x] !== TileType.FLOOR) continue;
+
+      this.tiles[y][x] = TileType.ORE_NODE;
+      this.oreNodes.push({ radical, x, y, richness });
+
+      if (this.tileSprites[y][x]) {
+        this.tileSprites[y][x]!.destroy();
+      }
+      const sprite = this.add.image(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, 'tile_ore');
+      this.tileSprites[y][x] = sprite;
+
+      this.add.text(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, radical, {
+        fontSize: '16px',
+        color: '#1a1410',
+        fontFamily: '"Noto Sans JP", sans-serif',
+        fontStyle: 'bold',
+      }).setOrigin(0.5).setDepth(1);
     }
   }
 
