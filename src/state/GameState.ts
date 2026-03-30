@@ -143,7 +143,9 @@ class GameStateClass {
 
   deserialize(json: string): void {
     const data = JSON.parse(json);
+    const defaults = this.createDefaultState();
     this.state = {
+      ...defaults,
       ...data,
       newKanjiShipped: new Set(data.newKanjiShipped || []),
     };

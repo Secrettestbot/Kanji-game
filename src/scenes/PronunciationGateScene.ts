@@ -113,6 +113,11 @@ export class PronunciationGateScene extends Phaser.Scene {
     // Setup keyboard input
     this.input.keyboard?.on('keydown', this.handleKeyDown, this);
 
+    // Cleanup keyboard listener on shutdown to prevent memory leaks
+    this.events.on('shutdown', () => {
+      this.input.keyboard?.off('keydown', this.handleKeyDown, this);
+    });
+
     // Start with meaning quiz
     this.showMeaningQuiz();
   }

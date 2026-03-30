@@ -158,8 +158,9 @@ export class ProductionSystem {
         const recipe = RecipeSystem.getRequiredRadicals(match.character);
         for (const r of recipe) {
           const count = radicals.get(r) || 0;
-          if (count <= 1) radicals.delete(r);
-          else radicals.set(r, count - 1);
+          const newCount = count - 1;
+          if (newCount <= 0) radicals.delete(r);
+          else radicals.set(r, newCount);
         }
 
         // Trigger pronunciation gate

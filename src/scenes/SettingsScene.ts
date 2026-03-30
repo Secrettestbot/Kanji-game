@@ -21,6 +21,8 @@ export class SettingsScene extends Phaser.Scene {
   };
 
   private panel!: Phaser.GameObjects.Container;
+  private deleteConfirmed = false;
+  private deleteButtonText?: Phaser.GameObjects.Text;
 
   constructor() {
     super({ key: 'SettingsScene' });
@@ -104,18 +106,20 @@ export class SettingsScene extends Phaser.Scene {
     }).setOrigin(0.5));
 
     y += 30;
+    this.deleteConfirmed = false;
     const deleteBg = this.add.rectangle(0, y, 200, 34, 0x5a2020)
       .setStrokeStyle(1, COLORS.VERMILLION)
       .setInteractive({ useHandCursor: true })
-      .on('pointerdown', () => this.confirmDelete())
+      .on('pointerdown', () => this.confirmDelete(deleteBg))
       .on('pointerover', () => deleteBg.setFillStyle(0x7a3030))
       .on('pointerout', () => deleteBg.setFillStyle(0x5a2020));
     this.panel.add(deleteBg);
-    this.panel.add(this.add.text(0, y, 'Delete All Save Data', {
+    this.deleteButtonText = this.add.text(0, y, 'Delete All Save Data', {
       fontSize: '13px',
       color: '#c53d43',
       fontFamily: '"Noto Sans JP", sans-serif',
-    }).setOrigin(0.5));
+    }).setOrigin(0.5);
+    this.panel.add(this.deleteButtonText);
 
     // Back button
     y += 55;
@@ -183,8 +187,16 @@ export class SettingsScene extends Phaser.Scene {
     }).setOrigin(0.5));
   }
 
-  private confirmDelete(): void {
-    // Simple confirmation — replace delete button with confirm
+  private confirmDelete(deleteBg: Phaser.GameObjects.Rectangle): void {
+    if (!this.deleteConfirmed) {
+      // First click — ask for confirmation
+      this.deleteConfirmed = true;
+      this.deleteButtonText?.setText('Are you sure? Click again');
+      deleteBg.setSize(260, 34);
+      return;
+    }
+
+    // Second click — actually delete
     SaveManager.deleteSave();
     GameState.reset();
     localStorage.removeItem(SETTINGS_KEY);

@@ -144,6 +144,11 @@ export class GameScene extends Phaser.Scene {
     this.events.on('resume', () => {
       this.gateActive = false;
     });
+
+    // Cleanup cross-scene listener on shutdown to prevent memory leaks
+    this.events.on('shutdown', () => {
+      this.scene.get('PronunciationGateScene')?.events?.off('gate-result', this.handleGateResult, this);
+    });
   }
 
   update(_time: number, delta: number): void {
@@ -378,15 +383,18 @@ export class GameScene extends Phaser.Scene {
   private removeItemSprite(id: string): void {
     const sprite = this.itemSprites.get(id);
     if (sprite) {
-      // Fade out and destroy
+      // Fade out and destroy — delete from map inside onComplete to avoid
+      // dangling references while the tween is still running
       this.tweens.add({
         targets: sprite,
         alpha: 0,
         scale: 0.3,
         duration: 200,
-        onComplete: () => sprite.destroy(),
+        onComplete: () => {
+          this.itemSprites.delete(id);
+          sprite.destroy();
+        },
       });
-      this.itemSprites.delete(id);
     }
   }
 

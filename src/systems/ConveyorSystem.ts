@@ -121,8 +121,9 @@ export class ConveyorSystem {
     }
 
     // Remove consumed/fallen items
-    for (const id of toRemove) {
-      this.removeItem(id);
+    if (toRemove.length > 0) {
+      const removeSet = new Set(toRemove);
+      this.items = this.items.filter(item => !removeSet.has(item.id));
     }
   }
 
