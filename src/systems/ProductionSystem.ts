@@ -105,7 +105,7 @@ export class ProductionSystem {
     }
 
     const oreNode = state.assignedOreNode;
-    if (!oreNode || oreNode.richness <= 0) return;
+    if (!oreNode || (oreNode.hp !== undefined && oreNode.hp <= 0)) return;
 
     // Get extraction rate based on tier
     const baseRate = machine.tier === MachineTier.T0 ? RATES.EXTRACTION_T0
@@ -120,7 +120,13 @@ export class ProductionSystem {
     if (state.extractionTimer >= adjustedRate) {
       state.extractionTimer -= adjustedRate;
 
-      // Produce radical
+      // Produce radical and deplete ore node HP
+      if (oreNode.hp === undefined) {
+        // Initialize HP from richness: richness 3 = 60 extractions, 2 = 40, 1 = 20
+        oreNode.hp = (oreNode.richness || 3) * 20;
+      }
+      oreNode.hp--;
+
       this.events.push({
         type: 'radical_extracted',
         machineId: machine.id,
@@ -128,6 +134,11 @@ export class ProductionSystem {
         x: machine.x,
         y: machine.y,
       });
+
+      // If ore node is depleted, clear assignment so extractor looks for a new one
+      if (oreNode.hp <= 0) {
+        state.assignedOreNode = undefined;
+      }
     }
   }
 

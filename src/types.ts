@@ -61,7 +61,8 @@ export interface OreNodeData {
   radical: string;
   x: number;
   y: number;
-  richness: number; // 1-3
+  richness: number; // 1-3 (rate modifier)
+  hp?: number;      // extraction cycles remaining (initialized from richness * 20)
 }
 
 export interface FactoryItemData {

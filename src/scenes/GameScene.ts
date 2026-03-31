@@ -6,6 +6,7 @@ import { ConveyorSystem, BeltItem } from '../systems/ConveyorSystem';
 import { GameState } from '../state/GameState';
 import { SaveManager } from '../state/SaveManager';
 import { DataManager } from '../data/DataManager';
+import { TutorialManager } from '../systems/TutorialManager';
 
 // Build mode selection
 type BuildSelection =
@@ -83,6 +84,9 @@ export class GameScene extends Phaser.Scene {
   private scrollKanjiProduced = new Set<string>();
   private playTimer = 0;
 
+  // Tutorial
+  private tutorial!: TutorialManager;
+
   constructor() {
     super({ key: 'GameScene' });
   }
@@ -137,6 +141,12 @@ export class GameScene extends Phaser.Scene {
       this.generateDispatchQuotas();
     }
 
+    // Tutorial
+    this.tutorial = new TutorialManager(this);
+    if (!TutorialManager.hasCompleted() && !this.activeScroll) {
+      this.tutorial.start();
+    }
+
     // Listen for gate scene results
     this.scene.get('PronunciationGateScene')?.events?.on('gate-result', this.handleGateResult, this);
 
@@ -145,9 +155,10 @@ export class GameScene extends Phaser.Scene {
       this.gateActive = false;
     });
 
-    // Cleanup cross-scene listener on shutdown to prevent memory leaks
+    // Cleanup on shutdown to prevent memory leaks
     this.events.on('shutdown', () => {
       this.scene.get('PronunciationGateScene')?.events?.off('gate-result', this.handleGateResult, this);
+      this.tutorial.destroy();
     });
   }
 
@@ -254,6 +265,22 @@ export class GameScene extends Phaser.Scene {
     if (belt) {
       const item = this.conveyorSystem.addItem(radical, 'radical', outX, outY);
       this.createItemSprite(item);
+      this.tutorial.notifyAction('radical_extracted');
+    } else {
+      // Show "no belt" warning — radical is wasted
+      const wx = outX * TILE_SIZE + TILE_SIZE / 2;
+      const wy = outY * TILE_SIZE + TILE_SIZE / 2;
+      const warn = this.add.text(wx, wy, '⚠', {
+        fontSize: '16px',
+        color: '#c53d43',
+      }).setOrigin(0.5).setDepth(60);
+      this.tweens.add({
+        targets: warn,
+        y: wy - 20,
+        alpha: 0,
+        duration: 1000,
+        onComplete: () => warn.destroy(),
+      });
     }
   }
 
@@ -323,7 +350,24 @@ export class GameScene extends Phaser.Scene {
     if (belt) {
       const item = this.conveyorSystem.addItem(character, 'kanji', outX, outY);
       this.createItemSprite(item);
+    } else {
+      // Show warning — kanji has nowhere to go
+      const wx = outX * TILE_SIZE + TILE_SIZE / 2;
+      const wy = outY * TILE_SIZE + TILE_SIZE / 2;
+      const warn = this.add.text(wx, wy, '⚠', {
+        fontSize: '16px',
+        color: '#c53d43',
+      }).setOrigin(0.5).setDepth(60);
+      this.tweens.add({
+        targets: warn,
+        y: wy - 20,
+        alpha: 0,
+        duration: 1000,
+        onComplete: () => warn.destroy(),
+      });
     }
+
+    this.tutorial.notifyAction('kanji_produced');
 
     // Check scroll completion
     this.checkScrollCompletion();
@@ -346,6 +390,7 @@ export class GameScene extends Phaser.Scene {
       const totalPoints = points + quotaBonus;
       const bonusText = quotaBonus > 0 ? ` (+${quotaBonus} bonus!)` : '';
       this.showNotification(`📦 ${item.character} shipped! +${totalPoints} ink${bonusText}`, COLORS.GOLD);
+      this.tutorial.notifyAction('kanji_shipped');
       this.updateHUD();
       this.updateQuotaDisplay();
     } else {
@@ -554,7 +599,7 @@ export class GameScene extends Phaser.Scene {
         const ty = machine.y + dy;
         if (tx < 0 || tx >= this.mapWidth || ty < 0 || ty >= this.mapHeight) continue;
 
-        const node = this.oreNodes.find(n => n.x === tx && n.y === ty && n.richness > 0);
+        const node = this.oreNodes.find(n => n.x === tx && n.y === ty && (n.hp === undefined || n.hp > 0));
         if (node) return node;
       }
     }
@@ -881,6 +926,11 @@ export class GameScene extends Phaser.Scene {
 
     this.createMachineSprite(machine);
     this.updateHUD();
+
+    // Notify tutorial
+    if (machineType === MachineType.EXTRACTION_STATION) this.tutorial.notifyAction('place_extractor');
+    else if (machineType === MachineType.COMPOSITION_FURNACE) this.tutorial.notifyAction('place_furnace');
+    else if (machineType === MachineType.DISPATCH_BOARD) this.tutorial.notifyAction('place_dispatch');
   }
 
   private createMachineSprite(machine: MachineInstance): void {
@@ -910,8 +960,95 @@ export class GameScene extends Phaser.Scene {
     }).setOrigin(0.5, 0);
     container.add(nameText);
 
+    // Show input/output indicators on machines
+    this.addMachineIOIndicators(container, machine);
+
     container.setDepth(10);
     this.machineSprites.set(machine.id, container);
+
+    // Dispatch boards get a special map beacon
+    if (machine.type === MachineType.DISPATCH_BOARD) {
+      this.createDispatchBeacon(machine);
+    }
+  }
+
+  private addMachineIOIndicators(container: Phaser.GameObjects.Container, machine: MachineInstance): void {
+    const hw = (machine.width * TILE_SIZE) / 2;
+    const hh = (machine.height * TILE_SIZE) / 2;
+
+    if (machine.type === MachineType.EXTRACTION_STATION) {
+      // Output arrow on right side
+      const arrow = this.add.text(hw + 2, 0, '▶', {
+        fontSize: '12px',
+        color: '#68be8d',
+        fontFamily: 'sans-serif',
+      }).setOrigin(0, 0.5);
+      container.add(arrow);
+      // Pulse the output arrow
+      this.tweens.add({ targets: arrow, alpha: 0.3, duration: 800, yoyo: true, repeat: -1 });
+    } else if (machine.type === MachineType.COMPOSITION_FURNACE) {
+      // Input arrow on left side
+      const inArrow = this.add.text(-hw - 12, 0, '▶', {
+        fontSize: '12px',
+        color: '#c53d43',
+        fontFamily: 'sans-serif',
+      }).setOrigin(0, 0.5);
+      container.add(inArrow);
+      this.tweens.add({ targets: inArrow, alpha: 0.3, duration: 800, yoyo: true, repeat: -1 });
+      // Output arrow on right side
+      const outArrow = this.add.text(hw + 2, 0, '▶', {
+        fontSize: '12px',
+        color: '#c4a747',
+        fontFamily: 'sans-serif',
+      }).setOrigin(0, 0.5);
+      container.add(outArrow);
+      this.tweens.add({ targets: outArrow, alpha: 0.3, duration: 800, yoyo: true, repeat: -1 });
+    } else if (machine.type === MachineType.DISPATCH_BOARD) {
+      // Input arrow on left side
+      const inArrow = this.add.text(-hw - 12, 0, '▶', {
+        fontSize: '12px',
+        color: '#c4a747',
+        fontFamily: 'sans-serif',
+      }).setOrigin(0, 0.5);
+      container.add(inArrow);
+      this.tweens.add({ targets: inArrow, alpha: 0.3, duration: 800, yoyo: true, repeat: -1 });
+    }
+  }
+
+  private dispatchBeacons: Phaser.GameObjects.Container[] = [];
+
+  private createDispatchBeacon(machine: MachineInstance): void {
+    const px = machine.x * TILE_SIZE + (machine.width * TILE_SIZE) / 2;
+    const py = machine.y * TILE_SIZE + (machine.height * TILE_SIZE) / 2;
+
+    const beacon = this.add.container(px, py).setDepth(5);
+
+    // Pulsing ring
+    const ring = this.add.circle(0, 0, machine.width * TILE_SIZE * 0.8, COLORS.GOLD, 0)
+      .setStrokeStyle(2, COLORS.GOLD, 0.6);
+    beacon.add(ring);
+
+    this.tweens.add({
+      targets: ring,
+      scale: 1.5,
+      alpha: 0,
+      duration: 2000,
+      repeat: -1,
+    });
+
+    // Steady glow
+    const glow = this.add.circle(0, 0, machine.width * TILE_SIZE * 0.5, COLORS.GOLD, 0.08);
+    beacon.add(glow);
+
+    this.tweens.add({
+      targets: glow,
+      alpha: 0.15,
+      duration: 1200,
+      yoyo: true,
+      repeat: -1,
+    });
+
+    this.dispatchBeacons.push(beacon);
   }
 
   // ─── Belt Placement ───
@@ -958,6 +1095,7 @@ export class GameScene extends Phaser.Scene {
     container.setDepth(5);
     this.beltSprites.set(key, container);
     this.updateHUD();
+    this.tutorial.notifyAction('place_belt');
   }
 
   // ─── Demolish ───
