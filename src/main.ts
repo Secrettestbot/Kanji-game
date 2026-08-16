@@ -41,4 +41,9 @@ const config: Phaser.Types.Core.GameConfig = {
   },
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
+
+// Debug handle: lets you inspect scenes and factory state from the browser
+// console (e.g. __SUMI__.scene.getScene('GameScene').machines), and lets
+// automated smoke tests drive the game. Harmless in a local single-player game.
+(window as unknown as { __SUMI__: Phaser.Game }).__SUMI__ = game;

@@ -845,12 +845,19 @@ export class GameScene extends Phaser.Scene {
 
   private setupInput(): void {
     this.input.on('wheel', (_pointer: Phaser.Input.Pointer, _gx: number[], _gy: number[], _gz: number[], deltaY: number) => {
+      // The recipe picker owns the wheel while it's open
+      if (this.recipePicker) return;
       const cam = this.cameras.main;
       const newZoom = Phaser.Math.Clamp(cam.zoom - deltaY * 0.001, 0.5, 3);
       cam.setZoom(newZoom);
     });
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      // Scene-level pointer events fire regardless of which game object was hit,
+      // so without this the picker's own clicks would also build on the map
+      // behind it.
+      if (this.recipePicker) return;
+
       if (pointer.rightButtonDown() || pointer.middleButtonDown()) {
         this.isDraggingCamera = true;
         this.lastPointer = { x: pointer.x, y: pointer.y };
@@ -1282,34 +1289,48 @@ export class GameScene extends Phaser.Scene {
       () => { machine.recipe = undefined; this.refreshFurnaceLabel(machine); this.closeRecipePicker(); },
       !machine.recipe));
 
-    // Scrollable list of concrete recipes
+    // Virtualized list: render only the visible slice and re-render on scroll.
+    // A geometry mask would be wrong here — this container is setScrollFactor(0)
+    // (screen-fixed) while masks resolve in world space, so the mask would drift
+    // away from the panel as soon as the camera pans.
+    const maxVisible = 8;
     const listContainer = this.add.container(0, listTop + 36);
-    const maxVisible = 9;
-    candidates.slice(0, 40).forEach((k, i) => {
-      const row = mkRow(k.character, `${k.radicals.join(' + ')}  —  ${k.meanings[0] ?? ''}`, i * 32,
-        () => { machine.recipe = k.character; this.refreshFurnaceLabel(machine); this.closeRecipePicker(); },
-        machine.recipe === k.character);
-      listContainer.add(row);
-    });
     picker.add(listContainer);
 
-    // Mask the list so long lists don't overflow the panel
-    const maskShape = this.make.graphics({}, false);
-    const maskTop = cam.height / 2 + listTop + 20;
-    maskShape.fillRect(cam.width / 2 - panelW / 2, maskTop, panelW, maxVisible * 32);
-    listContainer.setMask(maskShape.createGeometryMask());
+    let scrollIndex = 0;
+    const maxScrollIndex = Math.max(0, candidates.length - maxVisible);
 
-    let scroll = 0;
-    const maxScroll = Math.max(0, candidates.slice(0, 40).length - maxVisible) * 32;
+    const renderRows = () => {
+      listContainer.removeAll(true);
+      candidates.slice(scrollIndex, scrollIndex + maxVisible).forEach((k, i) => {
+        listContainer.add(mkRow(
+          k.character,
+          `${k.radicals.join(' + ')}  —  ${k.meanings[0] ?? ''}`,
+          i * 32,
+          () => { machine.recipe = k.character; this.refreshFurnaceLabel(machine); this.closeRecipePicker(); },
+          machine.recipe === k.character,
+        ));
+      });
+    };
+    renderRows();
+
     const wheelHandler = (_p: unknown, _dx: number, _dy: number, dz: number) => {
-      scroll = Phaser.Math.Clamp(scroll + (dz > 0 ? 32 : -32), 0, maxScroll);
-      listContainer.setY(listTop + 36 - scroll);
+      if (!this.recipePicker) return;
+      const next = Phaser.Math.Clamp(scrollIndex + (dz > 0 ? 1 : -1), 0, maxScrollIndex);
+      if (next === scrollIndex) return;
+      scrollIndex = next;
+      renderRows();
     };
     this.input.on('wheel', wheelHandler);
 
     if (candidates.length === 0) {
-      picker.add(this.add.text(0, 0, 'No recipes available from this map’s ore nodes.', {
+      picker.add(this.add.text(0, 20, 'No recipes available from this map’s ore nodes.', {
         fontSize: '12px', color: '#8b7d6b', fontFamily: '"Noto Sans JP", sans-serif',
+      }).setOrigin(0.5));
+    } else if (candidates.length > maxVisible) {
+      picker.add(this.add.text(0, panelH / 2 - 18,
+        `${candidates.length} recipes — scroll to see more`, {
+        fontSize: '10px', color: '#8b7d6b', fontFamily: '"Noto Sans JP", sans-serif',
       }).setOrigin(0.5));
     }
 
@@ -1321,7 +1342,6 @@ export class GameScene extends Phaser.Scene {
     picker.add(closeBtn);
 
     picker.setData('wheelHandler', wheelHandler);
-    picker.setData('mask', maskShape);
     this.recipePicker = picker;
   }
 
@@ -1329,8 +1349,6 @@ export class GameScene extends Phaser.Scene {
     if (!this.recipePicker) return;
     const handler = this.recipePicker.getData('wheelHandler');
     if (handler) this.input.off('wheel', handler);
-    const mask = this.recipePicker.getData('mask') as Phaser.GameObjects.Graphics | undefined;
-    mask?.destroy();
     this.recipePicker.destroy(true);
     this.recipePicker = undefined;
   }
