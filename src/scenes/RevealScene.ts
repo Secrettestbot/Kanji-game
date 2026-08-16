@@ -58,7 +58,7 @@ export class RevealScene extends Phaser.Scene {
     }
 
     // Kill infinite tweens on shutdown to prevent memory leaks
-    this.events.on('shutdown', () => {
+    this.events.once('shutdown', () => {
       this.tweens.killAll();
     });
   }

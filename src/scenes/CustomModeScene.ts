@@ -122,7 +122,9 @@ export class CustomModeScene extends Phaser.Scene {
     document.body.appendChild(this.inputElement);
 
     // Clean up on scene shutdown
-    this.events.on('shutdown', () => {
+    // once(): Phaser reuses the scene instance, so on() would stack a new
+    // handler every time this scene is entered.
+    this.events.once('shutdown', () => {
       if (this.inputElement) {
         this.inputElement.remove();
         this.inputElement = undefined;

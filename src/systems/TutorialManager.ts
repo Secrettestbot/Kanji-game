@@ -72,7 +72,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
   },
   {
     id: 'complete',
-    message: 'You\'ve built your first production line! 🎉\n\nTips:\n• Different ore nodes have different radicals\n• Furnaces need the right combination of radicals\n• Check Dispatch Orders (top-left) for bonus ink\n• Press [C] to open the Codex and review learned kanji',
+    message: 'You\'ve built your first production line! 🎉\n\nTips:\n• Click a Furnace (with no build tool selected) to pin it to a specific kanji — otherwise it builds whatever it can from the radicals it has\n• Feed a furnace two different radicals to make compound kanji, e.g. 木 + 日 = 東\n• Check Dispatch Orders (top-left) for bonus ink\n• Press [C] to open the Codex and review learned kanji',
     hint: 'Click to close the tutorial. Have fun!',
   },
 ];
@@ -111,9 +111,9 @@ export class TutorialManager {
   notifyAction(action: string): void {
     if (!this.active) return;
 
-    const step = TUTORIAL_STEPS[this.currentStep];
-    if (!step?.requiredAction) return;
-
+    // Record progress unconditionally. Recording only while a step is waiting
+    // on that action would ignore anything the player did during a narration
+    // step, forcing them to redo it once the matching step appears.
     switch (action) {
       case 'place_extractor':
         this.extractorPlaced = true;

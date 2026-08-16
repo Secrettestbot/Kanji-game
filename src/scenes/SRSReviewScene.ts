@@ -134,7 +134,7 @@ export class SRSReviewScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-ESC', () => this.exitReview());
 
     // Cleanup keyboard listener on shutdown to prevent memory leaks
-    this.events.on('shutdown', () => {
+    this.events.once('shutdown', () => {
       this.input.keyboard?.off('keydown', this.handleKeyDown, this);
     });
 

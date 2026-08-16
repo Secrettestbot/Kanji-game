@@ -157,20 +157,23 @@ export class GameScene extends Phaser.Scene {
       this.tutorial.start();
     }
 
-    // Listen for gate scene results
+    // Listen for gate scene results.
     // PronunciationGateScene emits 'gate-result' on THIS scene's emitter, so we
     // must listen here. Listening on the gate scene's own emitter silently never
     // fires, which leaves every furnace stuck in waitingForGate forever.
+    //
+    // Phaser reuses the scene instance, so create() runs again on every restart.
+    // These are registered with off()-first / once() so handlers don't stack up.
+    this.events.off('gate-result', this.handleGateResult, this);
     this.events.on('gate-result', this.handleGateResult, this);
 
-    // Listen for codex close
-    this.events.on('resume', () => {
-      this.gateActive = false;
-    });
+    this.events.off('resume', this.handleSceneResume, this);
+    this.events.on('resume', this.handleSceneResume, this);
 
-    // Cleanup on shutdown to prevent memory leaks
-    this.events.on('shutdown', () => {
+    // Cleanup on shutdown. once() so this handler itself doesn't accumulate.
+    this.events.once('shutdown', () => {
       this.events.off('gate-result', this.handleGateResult, this);
+      this.events.off('resume', this.handleSceneResume, this);
       this.tutorial.destroy();
       this.closeRecipePicker();
     });
@@ -335,6 +338,17 @@ export class GameScene extends Phaser.Scene {
     this.scene.pause();
   }
 
+  /**
+   * Fires when an overlay (Codex, gate) hands control back. Only clear the gate
+   * flag if no gate is actually on screen — a queued gate re-pauses this scene,
+   * and the outgoing gate's resume call must not unfreeze it underneath.
+   */
+  private handleSceneResume = (): void => {
+    if (this.pendingGates.length === 0 && !this.gateMachineId) {
+      this.gateActive = false;
+    }
+  };
+
   private handleGateResult = (result: { passed: boolean; kanji: string }): void => {
     // PronunciationGateScene resumes this scene itself right after emitting,
     // so don't resume here as well.
@@ -357,8 +371,13 @@ export class GameScene extends Phaser.Scene {
       this.showNotification(`${result?.kanji ?? ''} — try again next time`, COLORS.VERMILLION);
     }
 
-    // Drain any gates that queued up behind this one
-    this.processNextGate();
+    // Drain any gates queued behind this one, but only after the outgoing gate
+    // scene has finished stopping. Launching synchronously would race that
+    // teardown, and its trailing scene.resume('GameScene') would un-pause us
+    // while the next gate's overlay is already up.
+    if (this.pendingGates.length > 0) {
+      this.time.delayedCall(0, () => this.processNextGate());
+    }
   };
 
   private onKanjiProduced(machineId: string, character: string): void {

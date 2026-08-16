@@ -114,7 +114,7 @@ export class PronunciationGateScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown', this.handleKeyDown, this);
 
     // Cleanup keyboard listener on shutdown to prevent memory leaks
-    this.events.on('shutdown', () => {
+    this.events.once('shutdown', () => {
       this.input.keyboard?.off('keydown', this.handleKeyDown, this);
     });
 
