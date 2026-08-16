@@ -72,7 +72,8 @@ class DataManagerClass {
     return k?.radicals;
   }
 
-  // Check if a set of radicals can produce a kanji
+  // Exact-set match: the radicals given are exactly one kanji's recipe.
+  // Kept for callers that genuinely want an exact match.
   findKanjiFromRadicals(radicals: string[]): KanjiData | undefined {
     const sorted = [...radicals].sort();
     for (const k of this.kanji.values()) {
@@ -82,6 +83,52 @@ class DataManagerClass {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Subset match: find the best kanji producible from an inventory of radicals.
+   * A furnace holds a pool of radicals; it should be able to build any recipe
+   * fully covered by that pool, not only when the pool matches a recipe exactly.
+   *
+   * Preference order (so a pool of 一+二 builds 三 rather than just 一):
+   *   1. most radicals consumed (favours complete/complex kanji)
+   *   2. fewest strokes  (favours simpler, earlier-learned kanji on ties)
+   *   3. codepoint order (deterministic final tie-break)
+   */
+  findBestKanjiFromInventory(
+    available: Map<string, number>,
+    exclude?: (k: KanjiData) => boolean,
+  ): KanjiData | undefined {
+    let best: KanjiData | undefined;
+
+    for (const k of this.kanji.values()) {
+      const recipe = k.radicals;
+      if (!recipe || recipe.length === 0) continue;
+      if (exclude?.(k)) continue;
+
+      // Count required radicals for this recipe
+      const needed = new Map<string, number>();
+      for (const r of recipe) needed.set(r, (needed.get(r) || 0) + 1);
+
+      // Is the whole recipe covered by the pool?
+      let covered = true;
+      for (const [radical, count] of needed) {
+        if ((available.get(radical) || 0) < count) { covered = false; break; }
+      }
+      if (!covered) continue;
+
+      if (!best) { best = k; continue; }
+
+      if (recipe.length !== best.radicals.length) {
+        if (recipe.length > best.radicals.length) best = k;
+      } else if (k.strokeCount !== best.strokeCount) {
+        if (k.strokeCount < best.strokeCount) best = k;
+      } else if (k.character < best.character) {
+        best = k;
+      }
+    }
+
+    return best;
   }
 
   // Word queries

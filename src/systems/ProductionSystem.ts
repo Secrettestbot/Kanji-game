@@ -150,43 +150,49 @@ export class ProductionSystem {
   ): void {
     if (state.waitingForGate) return; // Waiting for pronunciation gate
 
-    const radicals = state.inputRadicals!;
+    if (!state.inputRadicals) state.inputRadicals = new Map();
+    const radicals = state.inputRadicals;
 
-    // Check if we have a recipe match
-    const match = RecipeSystem.findMatch(Array.from(radicals.keys()).flatMap(k => {
-      const count = radicals.get(k) || 0;
-      return Array(count).fill(k);
-    }));
-
-    if (match) {
-      const cycleTime = machine.tier === MachineTier.T2 ? RATES.FURNACE_T2_CYCLE : RATES.FURNACE_CYCLE;
-      state.productionTimer = (state.productionTimer || 0) + delta;
-
-      if (state.productionTimer >= cycleTime) {
-        state.productionTimer = 0;
-
-        // Consume radicals
-        const recipe = RecipeSystem.getRequiredRadicals(match.character);
-        for (const r of recipe) {
-          const count = radicals.get(r) || 0;
-          const newCount = count - 1;
-          if (newCount <= 0) radicals.delete(r);
-          else radicals.set(r, newCount);
-        }
-
-        // Trigger pronunciation gate
-        state.waitingForGate = true;
-        state.outputKanji = match.character;
-
-        this.events.push({
-          type: 'gate_triggered',
-          machineId: machine.id,
-          character: match.character,
-          x: machine.x,
-          y: machine.y,
-        });
-      }
+    // Determine the target kanji.
+    // If the player pinned a recipe on this furnace, only build that; otherwise
+    // pick the best kanji fully covered by the current radical pool.
+    // Subset matching matters: surplus radicals must never block production,
+    // or the furnace jams permanently as soon as an extra radical arrives.
+    let target: string | undefined;
+    if (machine.recipe) {
+      if (RecipeSystem.canProduce(machine.recipe, radicals)) target = machine.recipe;
+    } else {
+      target = RecipeSystem.findBestFromInventory(radicals)?.character;
     }
+
+    if (!target) {
+      // Nothing buildable yet — hold the cycle timer so partial progress isn't lost
+      return;
+    }
+
+    const cycleTime = machine.tier === MachineTier.T2 ? RATES.FURNACE_T2_CYCLE : RATES.FURNACE_CYCLE;
+    state.productionTimer = (state.productionTimer || 0) + delta;
+
+    if (state.productionTimer < cycleTime) return;
+
+    // Consume exactly this recipe's radicals; surplus stays in the furnace
+    if (!RecipeSystem.consume(target, radicals)) {
+      // Pool changed underneath us — retry next tick rather than emitting a
+      // kanji that was never paid for
+      return;
+    }
+
+    state.productionTimer = 0;
+    state.waitingForGate = true;
+    state.outputKanji = target;
+
+    this.events.push({
+      type: 'gate_triggered',
+      machineId: machine.id,
+      character: target,
+      x: machine.x,
+      y: machine.y,
+    });
   }
 
   // Called when a radical item arrives at a furnace

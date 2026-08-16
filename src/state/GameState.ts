@@ -48,6 +48,11 @@ class GameStateClass {
         timesReviewed: 0,
         srsInterval: 1,
         srsTier: 1,
+        // Passing the Pronunciation Gate counts as the first review, so the
+        // next one is due an interval from now. Without this stamp the kanji
+        // reads as "never reviewed" and shows up as due immediately,
+        // re-quizzing the player seconds after they learned it.
+        lastReviewDate: Date.now(),
       };
     } else {
       this.state.codexEntries[character].unlocked = true;
@@ -89,7 +94,10 @@ class GameStateClass {
     const now = Date.now();
     return Object.values(this.state.codexEntries)
       .filter(entry => {
-        if (!entry.unlocked || !entry.lastReviewDate) return entry.unlocked;
+        if (!entry.unlocked) return false;
+        // Saves written before reviews were stamped have no date; treat them
+        // as due rather than never-due.
+        if (!entry.lastReviewDate) return true;
         const daysSinceReview = (now - entry.lastReviewDate) / (1000 * 60 * 60 * 24);
         return daysSinceReview >= entry.srsInterval;
       })

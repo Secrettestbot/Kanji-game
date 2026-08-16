@@ -2,9 +2,36 @@ import { DataManager } from '../data/DataManager';
 import type { KanjiData } from '../types';
 
 export class RecipeSystem {
-  // Check if a collection of radicals matches any kanji recipe
+  // Exact-set match: the given radicals are precisely one kanji's recipe.
   static findMatch(radicals: string[]): KanjiData | undefined {
     return DataManager.findKanjiFromRadicals(radicals);
+  }
+
+  /**
+   * Best kanji producible from a furnace's radical pool (subset match).
+   * Unlike findMatch, surplus radicals in the pool do not block production.
+   */
+  static findBestFromInventory(
+    availableRadicals: Map<string, number>,
+    exclude?: (k: KanjiData) => boolean,
+  ): KanjiData | undefined {
+    return DataManager.findBestKanjiFromInventory(availableRadicals, exclude);
+  }
+
+  /**
+   * Consume exactly one kanji's recipe from the pool.
+   * Returns false and leaves the pool untouched if the recipe is not fully covered.
+   */
+  static consume(kanjiChar: string, availableRadicals: Map<string, number>): boolean {
+    if (!RecipeSystem.canProduce(kanjiChar, availableRadicals)) return false;
+
+    const recipe = DataManager.getRecipe(kanjiChar) || [];
+    for (const r of recipe) {
+      const remaining = (availableRadicals.get(r) || 0) - 1;
+      if (remaining <= 0) availableRadicals.delete(r);
+      else availableRadicals.set(r, remaining);
+    }
+    return true;
   }
 
   // Get all radicals needed for a specific kanji

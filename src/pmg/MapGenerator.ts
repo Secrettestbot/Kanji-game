@@ -48,34 +48,66 @@ export class MapGenerator {
       }
     }
 
-    // Stage 3: Place ore nodes in organized columns
+    // Stage 3: Place ore nodes in organized columns.
+    // Every radical MUST get a node — dropping one silently makes the kanji
+    // that needs it unbuildable and the generated map unwinnable.
     const oreNodes: OreNodeData[] = [];
     const radicals = [...radicalSet];
-    const cols = Math.ceil(radicals.length / Math.max(1, Math.floor((height - TILE_MARGIN * 2) / 5)));
-    const nodesPerCol = Math.ceil(radicals.length / Math.max(1, cols));
 
-    radicals.forEach((radical, i) => {
-      const col = Math.floor(i / nodesPerCol);
-      const row = i % nodesPerCol;
+    if (radicals.length > 0) {
+      // Find the tightest spacing that fits every node inside the usable area,
+      // relaxing from roomy to compact rather than discarding overflow.
+      let rowSpacing = 5;
+      let colSpacing = 6;
+      let rows = 0;
+      let cols = 0;
 
-      // Space columns evenly across left portion of map
-      const colSpacing = Math.max(6, Math.floor((width * 0.5) / Math.max(1, cols)));
-      const x = TILE_MARGIN + 1 + col * colSpacing;
-      const y = TILE_MARGIN + 1 + row * 5;
+      for (;;) {
+        const usableH = height - TILE_MARGIN * 2;
+        const usableW = width - TILE_MARGIN * 2;
+        rows = Math.max(1, Math.floor(usableH / rowSpacing));
+        cols = Math.max(1, Math.ceil(radicals.length / rows));
 
-      if (x < width - TILE_MARGIN && y < height - TILE_MARGIN) {
-        // Clear any obstacle at this position
-        tiles[y][x] = TileType.ORE_NODE;
-        occupied.add(`${x},${y}`);
-
-        oreNodes.push({
-          radical,
-          x,
-          y,
-          richness: 3,
-        });
+        if (cols * colSpacing <= usableW) break;      // fits
+        if (colSpacing > 3) { colSpacing--; continue; }
+        if (rowSpacing > 2) { rowSpacing--; continue; }
+        break; // already at minimum spacing; clamp below
       }
-    });
+
+      const usableW = width - TILE_MARGIN * 2;
+      const maxCols = Math.max(1, Math.floor(usableW / colSpacing));
+
+      radicals.forEach((radical, i) => {
+        const col = Math.floor(i / rows);
+        const row = i % rows;
+
+        // Clamp into bounds so a node is never lost, even in the pathological
+        // case where spacing bottomed out before everything fit.
+        const x = Math.min(
+          TILE_MARGIN + Math.min(col, maxCols - 1) * colSpacing,
+          width - TILE_MARGIN - 1,
+        );
+        const y = Math.min(
+          TILE_MARGIN + row * rowSpacing,
+          height - TILE_MARGIN - 1,
+        );
+
+        // Nudge off any tile already taken so two nodes never stack
+        let px = x;
+        let py = y;
+        let guard = 0;
+        while (occupied.has(`${px},${py}`) && guard < width * height) {
+          px++;
+          if (px >= width - TILE_MARGIN) { px = TILE_MARGIN; py++; }
+          if (py >= height - TILE_MARGIN) py = TILE_MARGIN;
+          guard++;
+        }
+
+        tiles[py][px] = TileType.ORE_NODE;
+        occupied.add(`${px},${py}`);
+        oreNodes.push({ radical, x: px, y: py, richness: 3 });
+      });
+    }
 
     // Stage 4: Generate dispatch quotas from producible kanji
     const quotaKanji = producibleKanji.slice(0, 5); // Max 5 quota targets

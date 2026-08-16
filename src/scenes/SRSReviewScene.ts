@@ -269,6 +269,7 @@ export class SRSReviewScene extends Phaser.Scene {
     if (!this.inputText.trim()) return;
 
     const item = this.reviewItems[this.currentIndex];
+    if (!item) return; // session already finished
     const hiraganaInput = isKana(this.inputText) ? this.inputText : romajiToHiragana(this.inputText);
     const katakanaInput = isKana(this.inputText) ? this.inputText : romajiToKatakana(this.inputText);
 

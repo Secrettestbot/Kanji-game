@@ -49,6 +49,8 @@ export interface MachineInstance {
   y: number;
   width: number;  // in tiles
   height: number; // in tiles
+  /** Furnaces only: kanji this furnace is pinned to build. Unset = auto-pick. */
+  recipe?: string;
 }
 
 export interface BeltSegment {

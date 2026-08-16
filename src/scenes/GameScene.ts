@@ -66,6 +66,7 @@ export class GameScene extends Phaser.Scene {
   // Gate state
   private gateActive = false;
   private gateMachineId: string | null = null;
+  private pendingGates: { machineId: string; character: string }[] = [];
 
   // Notification queue
   private notifications: Phaser.GameObjects.Container[] = [];
@@ -83,6 +84,9 @@ export class GameScene extends Phaser.Scene {
   // Scroll completion tracking
   private scrollKanjiProduced = new Set<string>();
   private playTimer = 0;
+
+  // Last belt tile placed, used to chain belt directions while dragging
+  private lastBeltPlaced?: { x: number; y: number };
 
   // Tutorial
   private tutorial!: TutorialManager;
@@ -112,6 +116,12 @@ export class GameScene extends Phaser.Scene {
     this.totalShippedCount = 0;
     this.shippedKanjiCount = 0;
     this.machineIdCounter = 0;
+    this.lastBeltPlaced = undefined;
+    this.dispatchBeacons = new Map();
+    this.recipePicker = undefined;
+    this.pendingGates = [];
+    this.gateActive = false;
+    this.gateMachineId = null;
     this.inkPoints = GameState.getInkPoints();
 
     // Use scroll data if available
@@ -148,7 +158,10 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Listen for gate scene results
-    this.scene.get('PronunciationGateScene')?.events?.on('gate-result', this.handleGateResult, this);
+    // PronunciationGateScene emits 'gate-result' on THIS scene's emitter, so we
+    // must listen here. Listening on the gate scene's own emitter silently never
+    // fires, which leaves every furnace stuck in waitingForGate forever.
+    this.events.on('gate-result', this.handleGateResult, this);
 
     // Listen for codex close
     this.events.on('resume', () => {
@@ -157,8 +170,9 @@ export class GameScene extends Phaser.Scene {
 
     // Cleanup on shutdown to prevent memory leaks
     this.events.on('shutdown', () => {
-      this.scene.get('PronunciationGateScene')?.events?.off('gate-result', this.handleGateResult, this);
+      this.events.off('gate-result', this.handleGateResult, this);
       this.tutorial.destroy();
+      this.closeRecipePicker();
     });
   }
 
@@ -291,30 +305,60 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    this.gateActive = true;
-    this.gateMachineId = machineId;
+    // Queue rather than launch directly: two furnaces can finish on the same
+    // tick, and launching twice would clobber the tracked machine id, leaving
+    // the first furnace stuck in waitingForGate forever.
+    this.pendingGates.push({ machineId, character });
+    this.processNextGate();
+  }
 
-    // Launch pronunciation gate overlay
+  private processNextGate(): void {
+    if (this.gateActive) return;
+
+    const next = this.pendingGates.shift();
+    if (!next) return;
+
+    // The kanji may have been unlocked by an earlier gate in this same queue
+    if (GameState.isKanjiUnlocked(next.character)) {
+      this.productionSystem.gateCleared(next.machineId);
+      this.processNextGate();
+      return;
+    }
+
+    this.gateActive = true;
+    this.gateMachineId = next.machineId;
+
     this.scene.launch('PronunciationGateScene', {
-      kanji: character,
-      kanjiData: DataManager.getKanji(character),
+      kanji: next.character,
+      kanjiData: DataManager.getKanji(next.character),
     });
     this.scene.pause();
   }
 
   private handleGateResult = (result: { passed: boolean; kanji: string }): void => {
-    this.scene.resume();
+    // PronunciationGateScene resumes this scene itself right after emitting,
+    // so don't resume here as well.
     this.gateActive = false;
 
-    if (result.passed && this.gateMachineId) {
-      GameState.unlockKanji(result.kanji);
-      this.productionSystem.gateCleared(this.gateMachineId);
-      this.showNotification(`✓ ${result.kanji} unlocked!`, COLORS.JADE);
-    } else if (this.gateMachineId) {
-      this.productionSystem.gateFailed(this.gateMachineId);
-      this.showNotification(`${result.kanji} — try again next time`, COLORS.VERMILLION);
-    }
+    const machineId = this.gateMachineId;
     this.gateMachineId = null;
+
+    if (!machineId) return;
+
+    if (result?.passed) {
+      GameState.unlockKanji(result.kanji);
+      this.productionSystem.gateCleared(machineId);
+      this.showNotification(`✓ ${result.kanji} unlocked!`, COLORS.JADE);
+      SaveManager.save();
+    } else {
+      // Release the furnace either way — leaving waitingForGate set would
+      // deadlock that furnace permanently.
+      this.productionSystem.gateFailed(machineId);
+      this.showNotification(`${result?.kanji ?? ''} — try again next time`, COLORS.VERMILLION);
+    }
+
+    // Drain any gates that queued up behind this one
+    this.processNextGate();
   };
 
   private onKanjiProduced(machineId: string, character: string): void {
@@ -809,6 +853,12 @@ export class GameScene extends Phaser.Scene {
         this.isDraggingBelt = true;
       } else if (this.buildSelection.type === 'demolish') {
         this.demolishAt(tileX, tileY);
+      } else {
+        // No build tool active: clicking a furnace opens its recipe picker
+        const m = this.getMachineAtTile(tileX, tileY);
+        if (m?.type === MachineType.COMPOSITION_FURNACE) {
+          this.openRecipePicker(m);
+        }
       }
     });
 
@@ -850,6 +900,7 @@ export class GameScene extends Phaser.Scene {
 
     // Keyboard shortcuts
     this.input.keyboard?.on('keydown-ESC', () => {
+      if (this.recipePicker) { this.closeRecipePicker(); return; }
       this.buildSelection = { type: 'none' };
       this.hoverHighlight.setVisible(false);
       this.updateBuildPanelHighlight();
@@ -1015,7 +1066,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private dispatchBeacons: Phaser.GameObjects.Container[] = [];
+  private dispatchBeacons: Map<string, Phaser.GameObjects.Container> = new Map();
 
   private createDispatchBeacon(machine: MachineInstance): void {
     const px = machine.x * TILE_SIZE + (machine.width * TILE_SIZE) / 2;
@@ -1048,7 +1099,7 @@ export class GameScene extends Phaser.Scene {
       repeat: -1,
     });
 
-    this.dispatchBeacons.push(beacon);
+    this.dispatchBeacons.set(machine.id, beacon);
   }
 
   // ─── Belt Placement ───
@@ -1064,16 +1115,32 @@ export class GameScene extends Phaser.Scene {
     if (this.inkPoints < 1) return;
     this.inkPoints -= 1;
 
+    // Direction comes from the belt we are extending, which must be ADJACENT.
+    // Using the globally last-placed belt is wrong: starting a new chain
+    // elsewhere on the map would inherit a direction from an unrelated tile.
     let dir = Direction.RIGHT;
-    if (this.belts.length > 0) {
-      const lastBelt = this.belts[this.belts.length - 1];
-      const dx = tileX - lastBelt.x;
-      const dy = tileY - lastBelt.y;
-      if (Math.abs(dx) >= Math.abs(dy)) {
-        dir = dx >= 0 ? Direction.RIGHT : Direction.LEFT;
-      } else {
-        dir = dy >= 0 ? Direction.DOWN : Direction.UP;
+    const prev = this.lastBeltPlaced;
+    const adjacent = prev
+      && Math.abs(tileX - prev.x) + Math.abs(tileY - prev.y) === 1
+      && this.getBeltAt(prev.x, prev.y);
+
+    if (prev && adjacent) {
+      const dx = tileX - prev.x;
+      const dy = tileY - prev.y;
+      dir = dx === 1 ? Direction.RIGHT
+        : dx === -1 ? Direction.LEFT
+        : dy === 1 ? Direction.DOWN
+        : Direction.UP;
+      // Point the tile we came from at this new tile so the chain actually connects
+      const prevBelt = this.getBeltAt(prev.x, prev.y);
+      if (prevBelt) {
+        prevBelt.direction = dir;
+        this.updateBeltArrow(prev.x, prev.y, dir);
       }
+    } else {
+      // Starting a fresh chain: aim away from an adjacent machine output if there
+      // is one, so belts naturally lead away from extractors/furnaces
+      dir = this.inferStartDirection(tileX, tileY);
     }
 
     const belt: BeltSegment = { x: tileX, y: tileY, direction: dir };
@@ -1094,8 +1161,181 @@ export class GameScene extends Phaser.Scene {
 
     container.setDepth(5);
     this.beltSprites.set(key, container);
+    this.lastBeltPlaced = { x: tileX, y: tileY };
     this.updateHUD();
     this.tutorial.notifyAction('place_belt');
+  }
+
+  /** Re-orient an already-placed belt's arrow sprite. */
+  private updateBeltArrow(tileX: number, tileY: number, dir: Direction): void {
+    const container = this.beltSprites.get(`${tileX},${tileY}`);
+    if (!container) return;
+    const arrow = container.list[1] as Phaser.GameObjects.Image | undefined;
+    if (!arrow || typeof arrow.setRotation !== 'function') return;
+    const rotation = { up: 0, right: Math.PI / 2, down: Math.PI, left: -Math.PI / 2 };
+    arrow.setRotation(rotation[dir]);
+  }
+
+  /**
+   * Direction for the first belt of a fresh chain. If the tile sits at a
+   * machine's output, run away from that machine; otherwise default to RIGHT.
+   */
+  private inferStartDirection(tileX: number, tileY: number): Direction {
+    for (const m of this.machines) {
+      const outX = m.x + m.width;
+      const outY = m.y + Math.floor(m.height / 2);
+      if (outX === tileX && outY === tileY) return Direction.RIGHT;
+    }
+    // Continue an existing adjacent belt's direction if one leads into this tile
+    const up = this.getBeltAt(tileX, tileY - 1);
+    if (up?.direction === Direction.DOWN) return Direction.DOWN;
+    const down = this.getBeltAt(tileX, tileY + 1);
+    if (down?.direction === Direction.UP) return Direction.UP;
+    const left = this.getBeltAt(tileX - 1, tileY);
+    if (left?.direction === Direction.RIGHT) return Direction.RIGHT;
+    const right = this.getBeltAt(tileX + 1, tileY);
+    if (right?.direction === Direction.LEFT) return Direction.LEFT;
+    return Direction.RIGHT;
+  }
+
+  // ─── Furnace Recipe Picker ───
+
+  private recipePicker?: Phaser.GameObjects.Container;
+
+  /**
+   * Let the player pin a furnace to a specific kanji. Without this an unpinned
+   * furnace greedily turns a lone radical into its identity kanji before the
+   * partner radical arrives, making compound kanji impossible to build reliably.
+   */
+  private openRecipePicker(machine: MachineInstance): void {
+    this.closeRecipePicker();
+
+    const cam = this.cameras.main;
+    const panelW = 460;
+    const panelH = 400;
+    const picker = this.add.container(cam.width / 2, cam.height / 2)
+      .setScrollFactor(0).setDepth(2500);
+
+    picker.add(this.add.rectangle(0, 0, panelW, panelH, COLORS.SUMI_DARK, 0.97)
+      .setStrokeStyle(3, COLORS.FURNACE).setInteractive());
+
+    picker.add(this.add.text(0, -panelH / 2 + 18, '炉 Furnace Recipe', {
+      fontSize: '17px', color: '#c53d43',
+      fontFamily: '"Noto Sans JP", sans-serif', fontStyle: 'bold',
+    }).setOrigin(0.5));
+
+    const current = machine.recipe ? `Pinned: ${machine.recipe}` : 'Auto (builds whatever it can)';
+    picker.add(this.add.text(0, -panelH / 2 + 40, current, {
+      fontSize: '11px', color: '#c4a747', fontFamily: '"Noto Sans JP", sans-serif',
+    }).setOrigin(0.5));
+
+    // Which radicals can this factory actually mine?
+    const available = new Set(this.oreNodes.map(n => n.radical));
+    const candidates = DataManager.getAllKanji()
+      .filter(k => k.radicals.length > 0 && k.radicals.every(r => available.has(r)))
+      .sort((a, b) =>
+        b.radicals.length - a.radicals.length ||
+        a.strokeCount - b.strokeCount ||
+        a.character.localeCompare(b.character));
+
+    // Auto option
+    const mkRow = (label: string, sub: string, y: number, onPick: () => void, active: boolean) => {
+      const row = this.add.container(0, y);
+      const bg = this.add.rectangle(0, 0, panelW - 40, 30,
+        active ? COLORS.FURNACE : COLORS.SUMI_MEDIUM)
+        .setStrokeStyle(1, COLORS.SUMI_LIGHT)
+        .setInteractive({ useHandCursor: true })
+        .on('pointerdown', onPick)
+        .on('pointerover', () => bg.setFillStyle(COLORS.SUMI_LIGHT))
+        .on('pointerout', () => bg.setFillStyle(active ? COLORS.FURNACE : COLORS.SUMI_MEDIUM));
+      row.add(bg);
+      row.add(this.add.text(-panelW / 2 + 30, 0, label, {
+        fontSize: '15px', color: '#f5f0e1', fontFamily: '"Noto Sans JP", sans-serif',
+      }).setOrigin(0, 0.5));
+      row.add(this.add.text(-panelW / 2 + 90, 0, sub, {
+        fontSize: '11px', color: '#8b7d6b', fontFamily: '"Noto Sans JP", sans-serif',
+      }).setOrigin(0, 0.5));
+      return row;
+    };
+
+    const listTop = -panelH / 2 + 68;
+    picker.add(mkRow('Auto', 'build whatever the pool allows', listTop,
+      () => { machine.recipe = undefined; this.refreshFurnaceLabel(machine); this.closeRecipePicker(); },
+      !machine.recipe));
+
+    // Scrollable list of concrete recipes
+    const listContainer = this.add.container(0, listTop + 36);
+    const maxVisible = 9;
+    candidates.slice(0, 40).forEach((k, i) => {
+      const row = mkRow(k.character, `${k.radicals.join(' + ')}  —  ${k.meanings[0] ?? ''}`, i * 32,
+        () => { machine.recipe = k.character; this.refreshFurnaceLabel(machine); this.closeRecipePicker(); },
+        machine.recipe === k.character);
+      listContainer.add(row);
+    });
+    picker.add(listContainer);
+
+    // Mask the list so long lists don't overflow the panel
+    const maskShape = this.make.graphics({}, false);
+    const maskTop = cam.height / 2 + listTop + 20;
+    maskShape.fillRect(cam.width / 2 - panelW / 2, maskTop, panelW, maxVisible * 32);
+    listContainer.setMask(maskShape.createGeometryMask());
+
+    let scroll = 0;
+    const maxScroll = Math.max(0, candidates.slice(0, 40).length - maxVisible) * 32;
+    const wheelHandler = (_p: unknown, _dx: number, _dy: number, dz: number) => {
+      scroll = Phaser.Math.Clamp(scroll + (dz > 0 ? 32 : -32), 0, maxScroll);
+      listContainer.setY(listTop + 36 - scroll);
+    };
+    this.input.on('wheel', wheelHandler);
+
+    if (candidates.length === 0) {
+      picker.add(this.add.text(0, 0, 'No recipes available from this map’s ore nodes.', {
+        fontSize: '12px', color: '#8b7d6b', fontFamily: '"Noto Sans JP", sans-serif',
+      }).setOrigin(0.5));
+    }
+
+    // Close button
+    const closeBtn = this.add.text(panelW / 2 - 18, -panelH / 2 + 18, '✕', {
+      fontSize: '20px', color: '#f5f0e1', fontFamily: 'sans-serif',
+    }).setOrigin(0.5).setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.closeRecipePicker());
+    picker.add(closeBtn);
+
+    picker.setData('wheelHandler', wheelHandler);
+    picker.setData('mask', maskShape);
+    this.recipePicker = picker;
+  }
+
+  private closeRecipePicker(): void {
+    if (!this.recipePicker) return;
+    const handler = this.recipePicker.getData('wheelHandler');
+    if (handler) this.input.off('wheel', handler);
+    const mask = this.recipePicker.getData('mask') as Phaser.GameObjects.Graphics | undefined;
+    mask?.destroy();
+    this.recipePicker.destroy(true);
+    this.recipePicker = undefined;
+  }
+
+  /** Show the pinned recipe under a furnace so its target is visible at a glance. */
+  private refreshFurnaceLabel(machine: MachineInstance): void {
+    const container = this.machineSprites.get(machine.id);
+    if (!container) return;
+
+    const existing = container.getData('recipeLabel') as Phaser.GameObjects.Text | undefined;
+    existing?.destroy();
+
+    if (!machine.recipe) {
+      container.setData('recipeLabel', undefined);
+      return;
+    }
+
+    const label = this.add.text(0, -(machine.height * TILE_SIZE) / 2 - 12, `→ ${machine.recipe}`, {
+      fontSize: '12px', color: '#c4a747',
+      fontFamily: '"Noto Sans JP", sans-serif', fontStyle: 'bold',
+      backgroundColor: '#1a1410cc', padding: { x: 3, y: 1 },
+    }).setOrigin(0.5);
+    container.add(label);
+    container.setData('recipeLabel', label);
   }
 
   // ─── Demolish ───
@@ -1127,8 +1367,18 @@ export class GameScene extends Phaser.Scene {
 
       const sprite = this.machineSprites.get(machine.id);
       if (sprite) {
+        this.tweens.killTweensOf(sprite);
         sprite.destroy();
         this.machineSprites.delete(machine.id);
+      }
+
+      // Dispatch boards own a separate beacon container that must go too,
+      // otherwise the pulsing ring outlives the machine it points at
+      const beacon = this.dispatchBeacons.get(machine.id);
+      if (beacon) {
+        beacon.each((c: Phaser.GameObjects.GameObject) => this.tweens.killTweensOf(c));
+        beacon.destroy();
+        this.dispatchBeacons.delete(machine.id);
       }
 
       const cost = this.getMachineCost(machine.type);
